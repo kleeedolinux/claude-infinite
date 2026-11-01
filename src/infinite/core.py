@@ -10,11 +10,13 @@ Design (borrowed and merged):
 """
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 import uuid
@@ -50,8 +52,10 @@ DEFAULTS = {
     "note_chars": 400,
     "rule_threshold": 2,       # reinforcements before a lesson/pref becomes a RULE
     "stop_reflect": True,      # Stop hook asks once per session to record lessons after corrections
-    "nap_min": 2,
-    "verify_claims": True,     # Stop/SubagentStop: check cited paths/symbols exist; wake the agent up if not              # smallest block that gets summarized
+    "nap_min": 2,              # smallest block that gets summarized
+    "verify_claims": True,     # Stop/SubagentStop: check cited paths/symbols exist; wake the agent up if not
+    "auto_index": True,        # SessionStart/Stop keep the code atlas fresh (time-boxed, incremental)
+    "prompt_code_hits": 4,     # code/doc locations injected per prompt (0 = off)
 }
 
 
@@ -184,17 +188,41 @@ def _connect(path: Path) -> sqlite3.Connection:
     c = sqlite3.connect(path, timeout=30, isolation_level=None)
     c.execute("pragma journal_mode=wal")
     c.execute("pragma synchronous=normal")
+    c.execute("pragma temp_store=memory")
+    c.execute("pragma cache_size=-8000")
     c.executescript(SCHEMA)
     return c
 
 
+_local = threading.local()
+atexit.register(lambda: close_all())
+
+
 @contextmanager
 def db():
-    c = _connect(db_path())
+    """Per-thread cached connection: schema/pragmas run once per process, not per call."""
+    path = db_path()
+    cache = getattr(_local, "conns", None)
+    if cache is None:
+        cache = _local.conns = {}
+    c = cache.get(path)
+    if c is None:
+        c = cache[path] = _connect(path)
     try:
         yield c
     finally:
-        c.close()
+        c.row_factory = None
+        if c.in_transaction:
+            c.execute("rollback")
+
+
+def close_all():
+    for c in getattr(_local, "conns", {}).values():
+        try:
+            c.close()
+        except Exception:
+            pass
+    _local.conns = {}
 
 
 @contextmanager
@@ -300,6 +328,7 @@ def emit(c, ev: dict):
 
 
 def rebuild() -> int:
+    close_all()
     p = db_path()
     for suffix in ("", "-wal", "-shm"):
         q = Path(str(p) + suffix)

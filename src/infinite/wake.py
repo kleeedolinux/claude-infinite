@@ -101,6 +101,18 @@ def wake(scope: str, root: Path, source: str = "startup", session: str | None = 
             dg = ""
         if dg:
             sections.append(("chat", "## Team chat (recent decisions/blockers/claims; `mem chat read`)\n" + dg))
+        try:
+            from . import atlas
+            if scope != "global" and atlas.exists(scope):
+                with atlas.adb(scope) as ac:
+                    nf = ac.execute("select count(*) from files").fetchone()[0]
+                    ns = ac.execute("select count(*) from symbols where kind!='module'").fetchone()[0]
+                    nd = ac.execute("select count(*) from docs").fetchone()[0]
+                sections.append(("atlas", "## Code atlas\n%d code files, %d symbols, %d docs indexed. Use `mem code search <words>` "
+                                 "before reading files, `mem code explain|flow <symbol>`, `mem code brief \"<task>\"` for subagents, "
+                                 "`mem code map` for the overview." % (nf, ns, nd)))
+        except Exception:
+            pass
         budget = cfg["wake_lines"]
         g_lines, g_miss = tree.render(c, "global", max(8, budget // 3), skip={r["id"] for r in rl})
         p_lines, p_miss = (tree.render(c, scope, budget, skip={r["id"] for r in rl}) if scope != "global" else ([], []))
@@ -159,6 +171,31 @@ def prompt_context(prompt: str, scope: str, ongoing: bool = False) -> str:
             if extra:
                 rows = [r for r in core.get(c, extra[:3]) if not r["invalid_at"]]
                 out += ["- linked: " + core.fmt(r, 160) for r in rows]
+    try:
+        from . import atlas, learn
+        n = cfg.get("prompt_code_hits", 4)
+        if n and atlas.exists(scope):
+            qt = {t for t in core.tokens(prompt) if len(t) >= 3}
+            need = 1 if len(qt) <= 2 else 2
+
+            def overlap(h):  # absolute relevance: distinct query words present in the hit
+                text = core.fold(" ".join((h["where"], h["title"], h["snippet"])))
+                return sum(1 for t in qt if t in text)
+            code = [h for h in atlas.search(scope, prompt, limit=n * 3) if overlap(h) >= need][:n]
+            if code:
+                out.append("Relevant code/docs (index layer; read only these ranges, or `mem code explain <symbol>`):")
+                out += ["- %s %s %s" % (h["type"], h["where"], h["title"][:110]) for h in code]
+        if learn.QUESTION.search(prompt):
+            root = core.find_root()
+            gl = learn.load(root)
+            tq = learn.terms_in(prompt, gl)
+            out.append("Explain mode: answer in layers — WHAT it is (concept, plain words, analogy) → WHY it exists here → "
+                       "HOW it works here (real flow with file:line; `mem code flow <symbol>`) → define NEW terms only. "
+                       "For a full grounded pack run `mem explain \"<question>\"`. Save new terms with `mem term add`.")
+            for t in tq[:4]:
+                out.append("- term %s%s: %s" % (t, " (user knows it)" if learn.known(t) else "", gl[t].get("what", "")[:160]))
+    except Exception:
+        pass
     if harvest.IDEA.search(prompt):
         out.append(BIAS_PROTOCOL)
     if ongoing and (harvest.IDEA.search(prompt) or harvest.ADDON.search(prompt)):

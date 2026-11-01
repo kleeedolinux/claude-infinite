@@ -47,6 +47,23 @@ def _source_blob(root: Path, max_files=4000, max_bytes=40_000_000) -> str:
     return "\n".join(parts)
 
 
+def _atlas_names(root: Path):
+    """All defined symbol names + called names from the atlas (None if not indexed)."""
+    try:
+        from . import atlas, core
+        scope = core.scope_key(root)
+        if not atlas.exists(scope):
+            return None
+        with atlas.adb(scope) as c:
+            if not c.execute("select 1 from files limit 1").fetchone():
+                return None
+            names = {r[0] for r in c.execute("select name from symbols")}
+            names |= {r[0].split(".")[-1] for r in c.execute("select distinct callee from calls")}
+        return names
+    except Exception:
+        return None
+
+
 def _resolve(raw: str, root: Path, extra_roots=()) -> Path | None:
     s = raw.replace("\\", "/")
     if s.startswith("~"):
@@ -115,6 +132,15 @@ def check(text: str, root: str | Path, max_items=12) -> list[str]:
                 seen.add(name)
                 syms.append(name)
     if syms and ((root / ".git").exists() or (root / "pyproject.toml").exists() or (root / "package.json").exists()):
+        names = _atlas_names(root)
+        if names is not None:  # fast path: the code index already knows every defined name
+            for name in syms[:20]:
+                last = name.split(".")[-1]
+                if last not in names:
+                    suspects.append("symbol `%s` not defined anywhere in the code index" % name)
+                    if len(suspects) >= max_items:
+                        break
+            return suspects
         blob = _source_blob(root)
         if blob:
             for name in syms[:20]:

@@ -25,6 +25,12 @@ improve    reflect (agenda: corrections, recurring errors, conflicts, naps)   in
 projects   project new <path> [--kind python|monorepo|generic] [--purpose ..] [--areas a,b]
            project scan <path> | migrate <path> | monorepo <target> <src...> | list
            import-claude [--all]   graph [--json]
+code       code index [--full] · code search <words> (code+docs, graph-expanded) · code find <words>
+           code explain <symbol|path:line> · code flow <symbol> [--depth 3] · code map · code graph
+           code brief "<task>" (compact grounded context for a subagent) · code site [outdir] · code docs
+docs       adr new "<title>" --context .. --decision .. --alternatives .. --consequences .. --affects a,b
+           adr list|check|show <id> · explain "<question>" (grounded pack: what/why/how + terms)
+learning   term add "T" --what .. [--why .. --analogy .. --how ..] · term list|candidates · learned <terms>
 team chat  chat post <#channel> "<msg>" --as <agent> [--kind decision|blocker|done|question]
            chat read [#channel] --as <agent> (unread + @mentions) · chat channels · chat digest
            chat claim <file|glob...> --as <agent> [--note ..] · chat release [..] · chat who
@@ -422,6 +428,129 @@ def cmd_chat(a):
         print(chat.digest(scope) or "(quiet)")
 
 
+def cmd_code(a):
+    from . import atlas
+    root = Path(a.path).resolve() if a.path else core.find_root()
+    scope = core.scope_key(root) if a.path else _scope(a)
+    q = " ".join(a.args)
+    act = a.action
+    if act != "index" and not atlas.exists(scope):
+        print("indexing %s first…" % root)
+        print(atlas.index(root, scope))
+    if act == "index":
+        if a.bg:  # detached background run from a hook: bounded, silent, always releases its lock
+            try:
+                for _ in range(20):  # up to ~20 x 15s slices, so huge repos converge in one go
+                    st = atlas.index(root, scope, budget_s=15)
+                    if not st.get("partial"):
+                        break
+            except Exception:
+                import traceback
+                with open(core.data_dir() / "hook-errors.log", "a", encoding="utf-8") as f:
+                    f.write("%s bg-index %s\n%s\n" % (time.strftime("%F %T"), root, traceback.format_exc()))
+            finally:
+                if a.lock:
+                    Path(a.lock).unlink(missing_ok=True)
+            return
+        print(atlas.index(root, scope, full=a.full))
+    elif act == "find":
+        for s in atlas.find(scope, q, limit=a.n):
+            print("%-38s %s %s  %s" % (atlas.loc(s), s["kind"], s["qual"], (s["sig"] or "")[:80]))
+    elif act == "search":
+        print(atlas.format_hits(atlas.search(scope, q, limit=a.n)) or "nothing found")
+    elif act == "explain":
+        print(atlas.explain(scope, q, src_lines=a.lines))
+    elif act == "flow":
+        txt, mm = atlas.flow(scope, q, depth=a.depth)
+        print(txt + ("\n\n" + mm if mm else ""))
+    elif act == "map":
+        print(atlas.overview(scope))
+    elif act == "graph":
+        print(atlas.module_graph(scope))
+    elif act == "brief":
+        print(atlas.brief(scope, q))
+    elif act == "site":
+        from . import site
+        out = site.build(scope, atlas.root_of(scope), Path(q) if q else None)
+        print("site written: %s (open it in a browser; offline, single file)" % out)
+    elif act == "docs":
+        print(write_arch_doc(scope))
+
+
+GEN_BEGIN, GEN_END = "<!-- generated:begin (mem code docs) -->", "<!-- generated:end -->"
+
+
+def write_arch_doc(scope) -> str:
+    """docs/ARCHITECTURE.md: generated facts between markers; human text outside is preserved."""
+    from . import atlas
+    root = atlas.root_of(scope)
+    p = root / "docs" / "ARCHITECTURE.md"
+    gen = "%s\n_Generated from the code index on %s. Do not edit inside these markers._\n\n%s\n\n## Module graph\n%s\n%s" % (
+        GEN_BEGIN, time.strftime("%Y-%m-%d"), atlas.overview(scope), atlas.module_graph(scope), GEN_END)
+    if p.exists():
+        cur = p.read_text(encoding="utf-8")
+        if GEN_BEGIN in cur and GEN_END in cur:
+            a_, b_ = cur.index(GEN_BEGIN), cur.index(GEN_END) + len(GEN_END)
+            new = cur[:a_] + gen + cur[b_:]
+        else:
+            new = cur.rstrip() + "\n\n" + gen + "\n"
+    else:
+        new = ("# Architecture\n\n## Overview (human-written)\nTODO: the big picture in a few paragraphs: what the system does,"
+               " the main flow, why it is shaped this way (link ADRs).\n\n" + gen + "\n")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(new, encoding="utf-8")
+    return "wrote %s" % p
+
+
+def cmd_adr(a):
+    from . import adr
+    root = core.find_root()
+    if a.action == "new":
+        r = adr.new(root, " ".join(a.args), a.context or "", a.decision or "", a.alternatives or "",
+                    a.consequences or "", a.affects or "", a.status, a.supersedes or "")
+        print("wrote %s %s — fill any TODO sections" % (r["id"], r["path"]))
+    elif a.action == "list":
+        for x in adr.all_(root):
+            print("%s [%s] %s  (%s)  affects: %s" % (x["id"], x["status"], x["title"], x["date"], ", ".join(x["affects"]) or "-"))
+    elif a.action == "check":
+        probs = adr.check(root, core.scope_key(root))
+        print("\n".join("- " + p for p in probs) if probs else "ADRs consistent with the code")
+    elif a.action == "show":
+        for x in adr.all_(root):
+            if x["id"].lower() == (a.args[0] if a.args else "").lower():
+                print(x["text"])
+
+
+def cmd_term(a):
+    from . import learn
+    root = core.find_root()
+    if a.action == "add":
+        if not a.args or not a.what:
+            raise SystemExit('usage: mem term add "Term" --what ".." [--why ..] [--analogy ..] [--how file:line] [--see ..]')
+        print(learn.add(root, " ".join(a.args), a.what, a.why or "", a.analogy or "", a.how or "", a.see or ""))
+    elif a.action == "list":
+        for t, g in sorted(learn.load(root).items()):
+            print("%s%s: %s" % (t, " (known)" if learn.known(t) else "", g.get("what", "")))
+    elif a.action == "candidates":
+        for t, n in learn.candidates(core.current_scope(), root):
+            print("%4d  %s" % (n, t))
+
+
+def cmd_learned(a):
+    from . import learn
+    learn.mark_known(a.terms, level=a.level)
+    print("learner profile: user %s %s" % (a.level, ", ".join(a.terms)))
+
+
+def cmd_explain(a):
+    from . import atlas, learn
+    root = core.find_root()
+    scope = core.scope_key(root)
+    if not atlas.exists(scope):
+        atlas.index(root, scope)
+    print(learn.pack(" ".join(a.question), scope, root))
+
+
 def cmd_hook(a):
     from . import hooks
     hooks.run(a.name)
@@ -480,6 +609,21 @@ def build():
                                                                 "release", "who", "digest"])
     s.add_argument("args", nargs="*"); s.add_argument("--as", dest="as_"); s.add_argument("--kind", default="msg")
     s.add_argument("--all", action="store_true"); s.add_argument("--note")
+    s = add("code", cmd_code); s.add_argument("action", choices=["index", "find", "search", "explain", "flow", "map",
+                                                                "graph", "brief", "site", "docs"])
+    s.add_argument("args", nargs="*"); s.add_argument("--path"); s.add_argument("--full", action="store_true")
+    s.add_argument("-n", type=int, default=15); s.add_argument("--depth", type=int, default=3)
+    s.add_argument("--lines", type=int, default=60)
+    s.add_argument("--bg", action="store_true"); s.add_argument("--lock")
+    s = add("adr", cmd_adr); s.add_argument("action", choices=["new", "list", "check", "show"]); s.add_argument("args", nargs="*")
+    for f in ("context", "decision", "alternatives", "consequences", "affects", "supersedes"):
+        s.add_argument("--" + f)
+    s.add_argument("--status", default="accepted")
+    s = add("term", cmd_term); s.add_argument("action", choices=["add", "list", "candidates"]); s.add_argument("args", nargs="*")
+    for f in ("what", "why", "analogy", "how", "see"):
+        s.add_argument("--" + f)
+    s = add("learned", cmd_learned); s.add_argument("terms", nargs="+"); s.add_argument("--level", default="knows")
+    s = add("explain", cmd_explain); s.add_argument("question", nargs="+")
     s = add("hook", cmd_hook); s.add_argument("name")
     return p
 

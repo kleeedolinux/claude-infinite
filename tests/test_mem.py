@@ -164,6 +164,102 @@ class MemTest(unittest.TestCase):
         self.assertIn("Bias check", cli_out("bias", "rewrite", "parsers", "in", "rust"))
 
 
+class AtlasTest(unittest.TestCase):
+    def setUp(self):
+        self.proj = Path(tempfile.mkdtemp(prefix="aproj-"))
+        (self.proj / ".git").mkdir()
+        pkg = self.proj / "src" / "shop"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text('"""Shop package."""\n', encoding="utf-8")
+        (pkg / "cart.py").write_text(
+            '"""Shopping cart: totals and discounts."""\nimport os\nfrom .pricing import apply_discount\n\n\n'
+            'class Cart:\n    """Holds line items."""\n    def __init__(self):\n        self.items = []\n\n'
+            '    def total(self):\n        """Sum of items after discount."""\n        s = sum(self.items)\n'
+            '        os.walk(".")\n        return apply_discount(s)\n', encoding="utf-8")
+        (pkg / "pricing.py").write_text(
+            '"""Pricing rules."""\n\n\ndef apply_discount(amount):\n    """Ten percent off above 100."""\n'
+            '    if amount > 100:\n        return amount * 0.9\n    return amount\n\n\ndef walk():\n    return 1\n', encoding="utf-8")
+        (self.proj / "tests").mkdir()
+        (self.proj / "tests" / "test_cart.py").write_text(
+            "from shop.cart import Cart\n\n\ndef test_total():\n    c = Cart()\n    assert c.total() == 0\n", encoding="utf-8")
+        (self.proj / "web").mkdir()
+        (self.proj / "web" / "app.ts").write_text(
+            "import { api } from './api'\n\nexport function renderCart(items) {\n  return formatPrice(items.length)\n}\n\n"
+            "export const formatPrice = (n) => n.toFixed(2)\n", encoding="utf-8")
+        (self.proj / "README.md").write_text("# Shop\n\n## Discounts\nOrders above 100 get ten percent off.\n", encoding="utf-8")
+        self.scope = core.scope_key(self.proj)
+        os.chdir(self.proj)
+        from infinite import atlas
+        self.atlas = atlas
+        self.stats = atlas.index(self.proj, self.scope)
+
+    def test_index_symbols_calls_and_resolution(self):
+        a = self.atlas
+        self.assertEqual(self.stats["errors"], 0)
+        with a.adb(self.scope) as c:
+            s = a.lookup(c, "Cart.total")[0]
+            ce = {x["qual"] for x in a.callees(c, s["id"]) if x["id"]}
+            self.assertIn("shop.pricing.apply_discount", ce)       # resolved through `from .pricing import`
+            self.assertNotIn("shop.pricing.walk", ce)              # os.walk must NOT resolve to an internal walk()
+            disc = a.lookup(c, "apply_discount")[0]
+            self.assertEqual([x["qual"] for x in a.callers(c, disc["id"])], ["shop.cart.Cart.total"])
+            ts = a.lookup(c, "renderCart")[0]
+            self.assertEqual(ts["approx"], 1)
+            self.assertIn("formatPrice", {x["callee"] for x in a.callees(c, ts["id"])})
+
+    def test_search_graph_and_docs(self):
+        hits = self.atlas.search(self.scope, "discount", limit=10)
+        kinds = {h["type"] for h in hits}
+        self.assertIn("code", kinds)
+        self.assertIn("doc", kinds)
+        self.assertTrue(any("apply_discount" in h["title"] for h in hits))
+        self.assertTrue(any(h["where"].startswith("README.md:3") for h in hits))
+
+    def test_explain_flow_map_brief(self):
+        a = self.atlas
+        e = a.explain(self.scope, "apply_discount")
+        self.assertIn("src/shop/pricing.py:4", e)
+        self.assertIn("called by (1)", e)
+        txt, mm = a.flow(self.scope, "Cart.total")
+        self.assertIn("apply_discount", txt)
+        self.assertIn("flowchart", mm)
+        m = a.overview(self.scope)
+        self.assertIn("shop.cart -> shop.pricing", m)
+        b = a.brief(self.scope, "change the discount threshold")
+        self.assertIn("src/shop/pricing.py", b)
+        self.assertLess(len(b), 2700)
+        self.assertNotIn("Glossary", b)
+
+    def test_incremental_reindex(self):
+        st = self.atlas.index(self.proj, self.scope)
+        self.assertEqual(st["parsed"], 0)
+        (self.proj / "src" / "shop" / "pricing.py").unlink()
+        st = self.atlas.index(self.proj, self.scope)
+        self.assertEqual(st["removed"], 1)
+
+    def test_adr_glossary_pack_and_site(self):
+        from infinite import adr, learn, site
+        r = adr.new(self.proj, "Discount above 100", decision="10% off above 100", alternatives="flat fee",
+                    affects="src/shop/pricing.py,apply_discount")
+        self.assertEqual(r["id"], "ADR-0001")
+        self.assertIn("ADR-0001", self.atlas.explain(self.scope, "apply_discount"))
+        self.assertTrue(any("TODO" in p for p in adr.check(self.proj, self.scope)))
+        r2 = adr.new(self.proj, "Tiered discounts", decision="tiers", supersedes="ADR-0001",
+                     context="c", alternatives="a", consequences="x", affects="src/shop/pricing.py")
+        self.assertIn("superseded by ADR-0002", Path(adr.all_(self.proj)[0]["path"]).read_text(encoding="utf-8"))
+        learn.add(self.proj, "Discount", what="a price reduction", why="rewards big orders", how="src/shop/pricing.py:4")
+        self.assertIn("Discount", learn.load(self.proj))
+        p = learn.pack("how does the discount work?", self.scope, self.proj)
+        self.assertIn("NEW to the user", p)
+        learn.mark_known(["Discount"])
+        self.assertIn("user knows it", learn.pack("how does the discount work?", self.scope, self.proj))
+        out = site.build(self.scope, self.proj)
+        html = out.read_text(encoding="utf-8")
+        self.assertIn("apply_discount", html)
+        self.assertIn("ADR-0002", html)
+        self.assertNotIn("</script>\n<script", html.split("const D=")[1][:200])
+
+
 class VerifyChatTest(unittest.TestCase):
     def setUp(self):
         self.proj = Path(tempfile.mkdtemp(prefix="vproj-"))

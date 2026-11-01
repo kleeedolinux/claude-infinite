@@ -3,6 +3,7 @@ never block a session. Errors go to data/hook-errors.log for `mem doctor`."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -46,7 +47,40 @@ def session_start(inp: dict):
         with core.db() as c:
             st["notes_at_start"] = _max_note(c)
     harvest.save_state(st)
+    _auto_index(root, scope, budget=2.0)
     _out("SessionStart", wake.wake(scope, root, source=source, session=sid))
+
+
+def _indexable(root: Path) -> bool:
+    if root == Path.home() or len(root.parts) <= 2:
+        return False
+    return any((root / m).exists() for m in (".git", "CLAUDE.md", "pyproject.toml", "package.json", "Cargo.toml",
+                                             "go.mod", "setup.py", "requirements.txt"))
+
+
+def _auto_index(root: Path, scope: str, budget: float):
+    """Keep the code atlas fresh without ever stalling a session: spawn a DETACHED background
+    indexer (the hook returns immediately). A lock file prevents piling up indexers."""
+    if not core.config().get("auto_index", True) or not _indexable(root):
+        return
+    try:
+        lock = core.data_dir() / "atlas" / ("%s.lock" % scope[-120:])
+        lock.parent.mkdir(exist_ok=True)
+        if lock.exists() and time.time() - lock.stat().st_mtime < 300:
+            return  # an indexer is running (or just ran)
+        lock.write_text(str(time.time()), encoding="utf-8")
+        import subprocess
+        mem = Path(__file__).resolve().parent.parent / "mem.py"
+        cmd = [sys.executable, str(mem), "code", "index", "--path", str(root), "--bg", "--lock", str(lock)]
+        kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        if os.name == "nt":
+            kw["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_GROUP | NO_WINDOW
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen(cmd, **kw)
+    except Exception:
+        with open(core.data_dir() / "hook-errors.log", "a", encoding="utf-8") as f:
+            f.write("%s auto_index %s\n%s\n" % (time.strftime("%F %T"), root, traceback.format_exc()))
 
 
 def user_prompt(inp: dict):
@@ -127,6 +161,7 @@ def stop(inp: dict):
     sid = inp.get("session_id", "")
     scope = core.current_scope(inp.get("cwd"))
     harvest.harvest(inp.get("transcript_path"), scope, sid)
+    _auto_index(core.find_root(inp.get("cwd")), scope, budget=1.5)
     cfg = core.config()
     text = inp.get("last_assistant_message") or ""
     if not inp.get("stop_hook_active") and text:

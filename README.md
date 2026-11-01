@@ -22,6 +22,10 @@ mem help
 | Ideas without bias or derailing | Idea prompts get an anti-bias protocol: 3 or more real options, a premortem, and memory labeled separately from fresh reasoning. `#fresh` turns memory injection off. A mid-task idea is parked with `mem idea` (memory plus the TASKS.md Queue), and work continues. `mem bias "<idea>"` lists anchors and past failures. |
 | Big projects with many agents | `mem chat`: a per-project Slack-like board with channels, @mentions, unread cursors, file claims (overlaps refused) and a digest. Subagent reports are saved and posted to `#reports` automatically. The main agent acts as the compositor (see the `team` skill). |
 | Organize projects | `mem project new` (python, uv monorepo, or generic), `scan`, `migrate` (never overwrites), `monorepo` (plan with git subtree moves), `import-claude` (pulls in Claude Code's own memory files), and `graph` (mermaid of projects, tags and links). |
+| Understand the code (not summary slop) | Every project is indexed automatically in the background into a **code atlas** (Python via `ast`; JS/TS/Go/Rust via patterns): symbols, signatures, docstrings, calls, imports, tests and doc chunks. Use `mem code search` (graph-expanded, returns path:line ranges), `explain <symbol>`, `flow <symbol>` (what really happens, plus mermaid), and `map`. |
+| Docs, ADRs, visual site | `mem adr new/check` (decisions linked to the code they affect, with rot detection). `mem code docs` regenerates `docs/ARCHITECTURE.md` between markers and keeps human text. `mem code site` writes `docs/site/index.html`: offline, with a module graph, call graphs, search, ADRs, glossary and memory. |
+| Learn your own project | `mem explain "<question>"` gives a grounded pack in the order concept → why → how, with file:line. The glossary (`mem term add`) records what a thing *is*. The learner profile (`mem learned`) makes explanations skip what you already know. |
+| Lead / CTO / workers | You are the lead and the main agent is the CTO. The `worker` and `reviewer` agents have limited rights: they work on claimed files only, write no memory, make no architecture calls, and escalate via `@main`. `mem code brief "<task>"` gives each worker exact line ranges, its blast radius, tests and constraints. |
 | Continuity files | `.claude/TASKS.md` (In progress / Queue / Done) via `mem task`, and `docs/kb/` records with verdicts and supersedes, with IDs assigned at write time, via `mem kb`. |
 
 ## Installed pieces
@@ -44,6 +48,10 @@ src/infinite/
   chat.py      agent team chat, claims, digest
   projects.py  scaffold / scan / migrate / monorepo plan / import / graph
   tasks.py     TASKS.md and docs/kb
+  atlas.py     code index: scandir walk, threaded parse, symbols/calls/imports/doc chunks, graph search, explain/flow/brief
+  adr.py       architecture decision records linked to code
+  learn.py     glossary, learner profile, explain packs
+  site.py      static offline docs site
   cli.py       `mem` command
 skills/ agents/ claude/CLAUDE.global.md install.py tests/
 ```
@@ -57,6 +65,8 @@ skills/ agents/ claude/CLAUDE.global.md install.py tests/
 | `rule_threshold` | 2 | Reinforcements before a lesson or pref becomes a RULE. |
 | `stop_reflect` | true | Ask once for a lesson after uncorrected corrections. |
 | `verify_claims` | true | Hallucination check at Stop and SubagentStop. |
+| `auto_index` | true | Background, detached code indexing at session start and stop. |
+| `prompt_code_hits` | 4 | Code and doc locations injected per prompt. |
 
 `INFINITE_HOME` relocates everything, for example to a synced folder.
 
