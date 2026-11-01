@@ -56,6 +56,14 @@ src/infinite/
 skills/ agents/ claude/CLAUDE.global.md install.py tests/
 ```
 
+## Performance (measured, see docs/kb KB-0001)
+- **Hooks:** a fast path skips the CLI and loads imports lazily. On this machine: session-start about 0.16s, prompt about 0.11s, stop about 0.07s. Indexing never blocks a session; it runs in a detached background process with a lock file.
+- **Atlas** (518-file repo): full index 1.2s, no-op 0.03s, one changed file 0.08s. The work is split in three steps:
+  - **Fork/join:** parsing is spread across a process pool (250+ files) or a thread pool.
+  - **Reduce:** results are folded into bulk `executemany` batches.
+  - **Lazy:** only the calls a change can affect are re-resolved.
+- **Storage:** one `os.scandir` pass covers code and docs (no per-file stat on Windows). SQLite connections are cached per thread, with WAL. The hallucination check looks symbols up in the atlas instead of reading the source tree.
+
 ## Config (`mem config key=value`)
 | Key | Default | Meaning |
 |---|---|---|

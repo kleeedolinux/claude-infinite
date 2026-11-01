@@ -37,7 +37,7 @@ create index if not exists sym_name on symbols(name);
 create index if not exists sym_path on symbols(path);
 create table if not exists imports(path text, module text, target text, name text, line integer, internal text);
 create index if not exists imp_path on imports(path);
-create table if not exists calls(caller integer, callee text, line integer, resolved integer);
+create table if not exists calls(caller integer, callee text, line integer, resolved integer, last text);
 create index if not exists calls_caller on calls(caller);
 create index if not exists calls_resolved on calls(resolved);
 create virtual table if not exists sym_fts using fts5(name, qual, doc, sig, path, body,
@@ -49,6 +49,8 @@ create table if not exists chunks(id integer primary key, path text, heading tex
 create index if not exists chunks_path on chunks(path);
 create virtual table if not exists chunk_fts using fts5(heading, text, path, tokenize="porter unicode61 remove_diacritics 2");
 """
+SCHEMA_VERSION = "2"
+WALK_DOT_DIRS = {".claude", ".github"}
 DOC_EXT = {".md", ".markdown", ".rst", ".txt", ".adoc"}
 CHUNK_LINES = 60
 
@@ -150,7 +152,7 @@ def parse_python(src: str, rel: str):
                 syms.append(dict(name=ch.name, qual=qual, kind=kind, line=ch.lineno,
                                  end=getattr(ch, "end_lineno", ch.lineno), sig=sig,
                                  doc=ast.get_docstring(ch) or "", complexity=0 if is_cls else _complexity(ch),
-                                 parent=parent_idx, calls=calls, body=" ".join(sorted(body_ids))[:4000],
+                                 parent=parent_idx, calls=calls, body=" ".join(sorted(body_ids))[:1500],
                                  cls=cls))
                 visit(ch, len(syms) - 1, qual, ch.name if is_cls else cls)
             elif isinstance(ch, (ast.Import, ast.ImportFrom)):
@@ -226,7 +228,7 @@ def parse_regex(src: str, rel: str, lang: str):
                  if m.group(1) not in KEYWORDS and m.group(1) != name][:200]
         syms.append(dict(name=name, qual="%s.%s" % (mod, name), kind=kind, line=ln, end=end, sig=sig, doc=doc,
                          complexity=1 + len(re.findall(r"\b(if|for|while|case|catch|&&|\|\|)\b", body)),
-                         parent=0, calls=calls, body=" ".join(sorted(set(re.findall(r"[A-Za-z_]\w{2,}", body))))[:4000]))
+                         parent=0, calls=calls, body=" ".join(sorted(set(re.findall(r"[A-Za-z_]\w{2,}", body))))[:1500]))
     irx = re.compile(IMPORT_RX.get(lang, IMPORT_RX["generic"]), re.M)
     imps = [(m.group(1), m.group(1).split("/")[-1].split("::")[-1], src[:m.start()].count("\n") + 1)
             for m in irx.finditer(src)]
@@ -236,7 +238,7 @@ def parse_regex(src: str, rel: str, lang: str):
 
 # ------------------------------------------------------------------ indexing
 
-def walk(root: Path):
+def walk(root: Path, docs: bool = False):
     """Yield (path, rel, lang, mtime, size) using os.scandir; on Windows DirEntry.stat() is
     served from the directory listing, so no per-file syscall is needed."""
     root_s = str(root)
@@ -253,13 +255,14 @@ def walk(root: Path):
         for e in entries:
             try:
                 if e.is_dir(follow_symlinks=False):
-                    if e.name not in IGNORE and not e.name.startswith("."):
+                    if e.name not in IGNORE and (not e.name.startswith(".") or e.name in WALK_DOT_DIRS):
                         subdirs.append(e.path)
                     continue
                 ext = os.path.splitext(e.name)[1].lower()
-                if ext in LANGS:
+                lang = LANGS.get(ext) or ("doc" if docs and ext in DOC_EXT else None)
+                if lang:
                     st = e.stat(follow_symlinks=False)
-                    yield e.path, e.path[cut:].replace(chr(92), "/"), LANGS[ext], st.st_mtime, st.st_size
+                    yield e.path, e.path[cut:].replace(chr(92), "/"), lang, st.st_mtime, st.st_size
             except OSError:
                 continue
         stack.extend(reversed(subdirs))
@@ -288,59 +291,69 @@ def index(root: str | Path, scope: str | None = None, budget_s: float | None = N
     t0 = time.time()
     stats = {"scanned": 0, "parsed": 0, "removed": 0, "errors": 0, "partial": False}
     with adb(scope) as c:
+        if core.meta_get(c, "schema") != SCHEMA_VERSION:
+            _reset(c)
+            full = True
         known = {p: (m, s) for p, m, s in c.execute("select path, mtime, size from files")}
         seen = set()
         todo = []
-        for path, rel, lang, mtime, size in walk(root):  # scandir: no extra stat() per file
+        doc_items = []
+        for path, rel, lang, mtime, size in walk(root, docs=True):  # ONE scandir pass for code + docs
+            if lang == "doc":
+                doc_items.append((path, rel, mtime, size))
+                continue
             seen.add(rel)
             stats["scanned"] += 1
             if size <= MAX_FILE and (full or known.get(rel) != (mtime, size)):
                 todo.append((path, rel, lang, mtime, size))
-        # read + parse on a thread pool (I/O overlaps; batches keep the time budget honest)
-        results = []
-        workers = min(8, (os.cpu_count() or 2))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            for k in range(0, len(todo), 48):
-                if budget_s and time.time() - t0 > budget_s:
-                    stats["partial"] = True
-                    break
-                results.extend(ex.map(_parse_file, todo[k:k + 48]))
+        # FORK: parse in parallel; JOIN: collect results in order
+        results = _fork_join_parse(todo, t0, budget_s, stats)
+        # REDUCE: fold all parse results into a few bulk batches (ids assigned up front)
         c.execute("begin")
+        changed = [r[0][1] for r in results if r is not None]
+        dropped_names = _drop_many(c, changed)
+        next_id = (c.execute("select coalesce(max(id), 0) from symbols").fetchone()[0] or 0) + 1
+        files_rows, sym_rows, fts_rows, call_rows, imp_rows = [], [], [], [], []
         for res in results:
             if res is None:
                 stats["errors"] += 1
                 continue
             (path, rel, lang, mtime, size), nlines, syms, imps, main = res
-            _drop(c, rel)
             mod = module_name(rel)
-            c.execute("insert into files values(?,?,?,?,?,?)", (rel, mtime, size, lang, nlines, mod))
+            files_rows.append((rel, mtime, size, lang, nlines, mod))
             ids = []
             for s in syms:
+                sid = next_id
+                next_id += 1
                 parent = ids[s["parent"]] if s["parent"] is not None and s["parent"] < len(ids) else None
-                sid = c.execute("insert into symbols(path,module,name,qual,kind,line,end_line,sig,doc,complexity,parent,approx)"
-                                " values(?,?,?,?,?,?,?,?,?,?,?,?)",
-                                (rel, mod, s["name"], s["qual"], s["kind"], s["line"], s["end"], s["sig"],
-                                 s["doc"][:2000], s["complexity"], parent, int(lang != "python"))).lastrowid
                 ids.append(sid)
-                c.execute("insert into sym_fts(rowid,name,qual,doc,sig,path,body) values(?,?,?,?,?,?,?)",
-                          (sid, _split_ident(s["name"]), s["qual"], s["doc"][:2000], s["sig"], rel, s.get("body", "")))
+                kind, sig = s["kind"], s["sig"]
+                if main and len(ids) == 1:
+                    kind, sig = "module", "[entry point]"
+                sym_rows.append((sid, rel, mod, s["name"], s["qual"], kind, s["line"], s["end"], sig,
+                                 s["doc"][:2000], s["complexity"], parent, int(lang != "python")))
+                fts_rows.append((sid, _split_ident(s["name"]), s["qual"], s["doc"][:2000], sig, rel, s.get("body", "")))
                 for callee, line in s["calls"]:
                     if s.get("cls") and callee.startswith("self."):
                         callee = "%s.%s" % (s["cls"], callee[5:])
-                    c.execute("insert into calls values(?,?,?,null)", (sid, callee, line))
-            for target, name, line in imps:
-                c.execute("insert into imports values(?,?,?,?,?,null)", (rel, mod, target, name, line))
-            if main:
-                c.execute("update symbols set kind='module', sig='[entry point]' where id=?", (ids[0],))
+                    call_rows.append((sid, callee, line, None, callee.rsplit(".", 1)[-1]))
+            imp_rows += [(rel, mod, target, name, line, None) for target, name, line in imps]
             stats["parsed"] += 1
-        if not stats["partial"]:
-            for rel in set(known) - seen:
-                _drop(c, rel)
-                stats["removed"] += 1
+        c.executemany("insert into files values(?,?,?,?,?,?)", files_rows)
+        c.executemany("insert into symbols(id,path,module,name,qual,kind,line,end_line,sig,doc,complexity,parent,approx)"
+                      " values(?,?,?,?,?,?,?,?,?,?,?,?,?)", sym_rows)
+        c.executemany("insert into sym_fts(rowid,name,qual,doc,sig,path,body) values(?,?,?,?,?,?,?)", fts_rows)
+        c.executemany("insert into calls(caller,callee,line,resolved,last) values(?,?,?,?,?)", call_rows)
+        c.executemany("insert into imports values(?,?,?,?,?,?)", imp_rows)
+        removed = sorted(set(known) - seen) if not stats["partial"] else []
+        dropped_names |= _drop_many(c, removed)
+        stats["removed"] = len(removed)
         if stats["parsed"] or stats["removed"]:
-            _resolve(c)
+            # LAZY: full resolve only for a full index; otherwise just the calls this change can affect
+            new_names = {r[3] for r in sym_rows}
+            _resolve(c, None if full else (set(changed), new_names | dropped_names))
         if not stats["partial"]:
-            stats["docs"] = _index_docs(c, root, full)
+            stats["docs"] = _index_docs(c, doc_items, full)
         core.meta_set(c, "root", str(root))
         core.meta_set(c, "indexed_at", time.time())
         c.execute("commit")
@@ -371,34 +384,40 @@ def _chunks(text: str):
     return out
 
 
-def _index_docs(c, root: Path, full=False) -> int:
+def _read_doc(item):
+    path, rel, mtime, size = item
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return item, _chunks(f.read())
+    except OSError:
+        return None
+
+
+def _index_docs(c, items, full=False) -> int:
     known = {p: (m, s) for p, m, s in c.execute("select path, mtime, size from docs")}
-    seen, n = set(), 0
-    for dp, dn, fn in os.walk(root):
-        dn[:] = sorted(d for d in dn if d not in IGNORE and (not d.startswith(".") or d == ".claude"))
-        for f in fn:
-            p = Path(dp) / f
-            if p.suffix.lower() not in DOC_EXT:
-                continue
-            rel = p.relative_to(root).as_posix()
-            seen.add(rel)
-            try:
-                st = p.stat()
-            except OSError:
-                continue
-            if st.st_size > MAX_FILE or (not full and known.get(rel) == (st.st_mtime, st.st_size)):
-                continue
-            _drop_doc(c, rel)
-            text = p.read_text(encoding="utf-8", errors="replace")
-            for head, a, b, body in _chunks(text):
-                cid = c.execute("insert into chunks(path,heading,line,end_line,text) values(?,?,?,?,?)",
-                                (rel, head, a, b, body)).lastrowid
-                c.execute("insert into chunk_fts(rowid,heading,text,path) values(?,?,?,?)", (cid, head, body, rel))
-            c.execute("insert into docs values(?,?,?)", (rel, st.st_mtime, st.st_size))
-            n += 1
+    seen = {it[1] for it in items}
+    todo = [it for it in items if it[3] <= MAX_FILE and (full or known.get(it[1]) != (it[2], it[3]))]
+    if len(todo) >= 8:  # fork/join the reads; chunking is cheap, so threads are enough
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
+            res = [r for r in ex.map(_read_doc, todo) if r]
+    else:
+        res = [r for r in map(_read_doc, todo) if r]
+    for (path, rel, mtime, size), _ in res:
+        _drop_doc(c, rel)
+    next_id = (c.execute("select coalesce(max(id), 0) from chunks").fetchone()[0] or 0) + 1
+    rows, fts, docs = [], [], []
+    for (path, rel, mtime, size), chunks in res:  # reduce into bulk inserts
+        for head, a_, b_, body in chunks:
+            rows.append((next_id, rel, head, a_, b_, body))
+            fts.append((next_id, head, body, rel))
+            next_id += 1
+        docs.append((rel, mtime, size))
+    c.executemany("insert into chunks(id,path,heading,line,end_line,text) values(?,?,?,?,?,?)", rows)
+    c.executemany("insert into chunk_fts(rowid,heading,text,path) values(?,?,?,?)", fts)
+    c.executemany("insert into docs values(?,?,?)", docs)
     for rel in set(known) - seen:
         _drop_doc(c, rel)
-    return n
+    return len(res)
 
 
 def _drop_doc(c, rel):
@@ -415,18 +434,90 @@ def _split_ident(name: str) -> str:
 
 
 def _drop(c, rel):
-    ids = [r[0] for r in c.execute("select id from symbols where path=?", (rel,))]
-    if ids:
-        q = ",".join("?" * len(ids))
-        c.execute("delete from calls where caller in (%s)" % q, ids)
-        c.execute("delete from sym_fts where rowid in (%s)" % q, ids)
-        c.execute("delete from symbols where path=?", (rel,))
-    c.execute("delete from imports where path=?", (rel,))
-    c.execute("delete from files where path=?", (rel,))
+    _drop_many(c, [rel])
 
 
-def _resolve(c):
+def _drop_many(c, rels) -> set:
+    """Delete everything derived from these files in bulk; returns the symbol names that disappeared
+    (calls that pointed at them must be re-resolved). Calls into dropped ids are nulled lazily."""
+    names = set()
+    for k in range(0, len(rels), 400):
+        part = rels[k:k + 400]
+        q = ",".join("?" * len(part))
+        ids = [r[0] for r in c.execute("select id from symbols where path in (%s)" % q, part)]
+        names |= {r[0] for r in c.execute("select distinct name from symbols where path in (%s)" % q, part)}
+        for j in range(0, len(ids), 800):
+            sub = ids[j:j + 800]
+            qi = ",".join("?" * len(sub))
+            c.execute("delete from calls where caller in (%s)" % qi, sub)
+            c.execute("update calls set resolved=null where resolved in (%s)" % qi, sub)
+            c.execute("delete from sym_fts where rowid in (%s)" % qi, sub)
+        c.execute("delete from symbols where path in (%s)" % q, part)
+        c.execute("delete from imports where path in (%s)" % q, part)
+        c.execute("delete from files where path in (%s)" % q, part)
+    return names
+
+
+def _parse_pool_kind(n: int, budget_s) -> str:
+    # processes pay ~0.1-0.3s spawn on Windows: only worth it for big batches without a tight budget
+    if n >= 250 and (budget_s is None or budget_s >= 10):
+        return "procs"
+    return "threads" if n >= 8 else "serial"
+
+
+def _fork_join_parse(todo, t0, budget_s, stats):
+    kind = _parse_pool_kind(len(todo), budget_s)
+    if kind == "serial":
+        return [_parse_file(i) for i in todo]
+    workers = min(8, os.cpu_count() or 2)
+    results = []
+    try:
+        if kind == "procs":
+            from concurrent.futures import ProcessPoolExecutor
+            ex = ProcessPoolExecutor(max_workers=workers)
+            step, chunk = 256, max(4, min(32, len(todo) // (workers * 4) or 4))
+        else:
+            ex = ThreadPoolExecutor(max_workers=workers)
+            step, chunk = 48, 1
+        with ex:
+            for k in range(0, len(todo), step):
+                if budget_s and time.time() - t0 > budget_s:
+                    stats["partial"] = True
+                    break
+                results.extend(ex.map(_parse_file, todo[k:k + step], chunksize=chunk))
+    except Exception:  # e.g. process spawn not allowed: degrade to threads, never fail
+        if kind != "procs":
+            raise
+        done = len(results)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results.extend(ex.map(_parse_file, todo[done:]))
+    return results
+
+
+def _reset(c):
+    c.execute("begin")
+    for t in ("files", "symbols", "imports", "calls", "sym_fts", "docs", "chunks", "chunk_fts"):
+        c.execute("delete from %s" % t)
+    c.execute("commit")
+    try:
+        c.execute("alter table calls add column last text")
+    except sqlite3.OperationalError:
+        pass
+    c.execute("create index if not exists calls_last on calls(last)")
+    core.meta_set(c, "schema", SCHEMA_VERSION)
+
+
+def _resolve(c, delta=None):
+    """Resolve imports to internal modules and calls to internal symbols.
+    delta=None: everything. delta=(changed_paths, names): only calls made from changed files,
+    plus unresolved calls whose name was (re)defined or removed by this change."""
     mods = {m: p for m, p in c.execute("select module, path from files")}
+    suffix: dict[str, list] = {}  # every dotted suffix of every module -> modules (O(1) lookup)
+    for m in mods:
+        parts = m.split(".")
+        for i in range(len(parts)):
+            suffix.setdefault(".".join(parts[i:]), []).append(m)
+    imp_upd = []
     for rowid, target, name, mod in c.execute("select rowid, target, name, module from imports").fetchall():
         hit = None
         for cand in (target + "." + name, target, target.replace("/", ".").lstrip(".")):
@@ -444,9 +535,10 @@ def _resolve(c):
                 cand = ".".join(base)
                 hit = cand if cand in mods else None
             else:
-                tail = [m for m in mods if m.endswith("." + target) or m == target]
+                tail = suffix.get(target, [])
                 hit = tail[0] if len(tail) == 1 else None
-        c.execute("update imports set internal=? where rowid=?", (hit, rowid))
+        imp_upd.append((hit, rowid))
+    c.executemany("update imports set internal=? where rowid=?", imp_upd)
     by_name: dict[str, list] = {}
     by_qual = {}
     for sid, name, qual, mod, kind in c.execute("select id, name, qual, module, kind from symbols where kind!='module'"):
@@ -455,9 +547,23 @@ def _resolve(c):
     imported = {}
     for mod, name, internal in c.execute("select module, name, internal from imports where internal is not null"):
         imported.setdefault(mod, {})[name] = internal
+    base_sql = "select calls.rowid, callee, s.module, s.qual from calls join symbols s on s.id = calls.caller"
+    if delta is None:
+        todo_calls = c.execute(base_sql).fetchall()
+    else:
+        paths, names = delta
+        todo_calls = []
+        paths, names = list(paths), list(names)
+        for k in range(0, len(paths), 400):
+            part = paths[k:k + 400]
+            todo_calls += c.execute(base_sql + " where s.path in (%s)" % ",".join("?" * len(part)), part).fetchall()
+        for k in range(0, len(names), 400):
+            part = names[k:k + 400]
+            todo_calls += c.execute(base_sql + " where calls.resolved is null and calls.last in (%s)"
+                                    % ",".join("?" * len(part)), part).fetchall()
+        todo_calls = list(dict.fromkeys(todo_calls))
     upd = []
-    for rowid, callee, caller_mod, caller_qual in c.execute(
-            "select calls.rowid, callee, s.module, s.qual from calls join symbols s on s.id = calls.caller").fetchall():
+    for rowid, callee, caller_mod, caller_qual in todo_calls:
         target = None
         last = callee.split(".")[-1]
         head = callee.split(".")[0] if "." in callee else None

@@ -7,7 +7,6 @@ import os
 import re
 import sys
 import time
-import traceback
 from pathlib import Path
 
 from . import core, harvest, wake
@@ -80,7 +79,7 @@ def _auto_index(root: Path, scope: str, budget: float):
         subprocess.Popen(cmd, **kw)
     except Exception:
         with open(core.data_dir() / "hook-errors.log", "a", encoding="utf-8") as f:
-            f.write("%s auto_index %s\n%s\n" % (time.strftime("%F %T"), root, traceback.format_exc()))
+            f.write("%s auto_index %s\n%s\n" % (time.strftime("%F %T"), root, __import__('traceback').format_exc()))
 
 
 def user_prompt(inp: dict):
@@ -157,15 +156,30 @@ def _flag(scope: str, who: str, suspects: list[str], session: str, final: bool):
         pass
 
 
+def _safe(fn, *args):
+    try:
+        fn(*args)
+        core.close_all()  # this thread's cached sqlite connection must not outlive it
+    except Exception:
+        with open(core.data_dir() / "hook-errors.log", "a", encoding="utf-8") as f:
+            f.write("%s %s%s%s%s" % (time.strftime("%F %T"), getattr(fn, "__name__", fn), NL,
+                                     __import__('traceback').format_exc(), NL))
+
+
 def stop(inp: dict):
     sid = inp.get("session_id", "")
     scope = core.current_scope(inp.get("cwd"))
-    harvest.harvest(inp.get("transcript_path"), scope, sid)
+    text = inp.get("last_assistant_message") or ""
+    check = bool(text) and not inp.get("stop_hook_active")
+    # FORK: transcript harvest (file I/O + sqlite) runs while the claim check runs; JOIN before deciding
+    import threading
+    th = threading.Thread(target=_safe, args=(harvest.harvest, inp.get("transcript_path"), scope, sid), daemon=True)
+    th.start()
+    sus = _hallucinations(text, inp) if check else []
+    th.join(10)
     _auto_index(core.find_root(inp.get("cwd")), scope, budget=1.5)
     cfg = core.config()
-    text = inp.get("last_assistant_message") or ""
-    if not inp.get("stop_hook_active") and text:
-        sus = _hallucinations(text, inp)
+    if check:
         if sus:
             _flag(scope, "main", sus, sid, final=False)
             root = core.find_root(inp.get("cwd"))
@@ -241,7 +255,7 @@ def run(name: str):
     except Exception:
         try:
             with open(core.data_dir() / "hook-errors.log", "a", encoding="utf-8") as f:
-                f.write("%s %s\n%s\n" % (time.strftime("%F %T"), name, traceback.format_exc()))
+                f.write("%s %s\n%s\n" % (time.strftime("%F %T"), name, __import__('traceback').format_exc()))
         except Exception:
             pass
     sys.exit(0)

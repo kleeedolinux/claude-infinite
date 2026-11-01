@@ -328,12 +328,20 @@ def emit(c, ev: dict):
 
 
 def rebuild() -> int:
+    """Replay the log into a fresh index. Deletes the file when possible (fixes real corruption);
+    if another connection holds it (Windows), resets the tables in place instead."""
     close_all()
     p = db_path()
-    for suffix in ("", "-wal", "-shm"):
-        q = Path(str(p) + suffix)
-        if q.exists():
-            q.unlink()
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            q = Path(str(p) + suffix)
+            if q.exists():
+                q.unlink()
+    except PermissionError:
+        with db() as c:
+            with tx(c):
+                for t in ("notes", "notes_fts", "summaries", "links"):
+                    c.execute("delete from %s" % t)
     n = 0
     with db() as c:
         with tx(c):
