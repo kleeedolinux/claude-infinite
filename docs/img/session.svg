@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440" role="img" aria-label="How claude-infinite runs inside one Claude Code session">
+<title>How claude-infinite runs inside one Claude Code session</title>
+<style>
+.h{font:600 15px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#111}
+.sub{font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#666}
+.t{font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:#111}
+.tb{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:#111}
+.s{font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:#555}
+.m{font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:#888}
+.ta{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:#3451d1}
+.box{fill:#fbfbfb;stroke:#d4d4d4;stroke-width:1.1}
+.acc{fill:#f1f4ff;stroke:#3451d1;stroke-width:1.2}
+.warn{fill:#fff6ee;stroke:#d9480f;stroke-width:1.2}
+.tw{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:#d9480f}
+.ln{stroke:#a3a3a3;stroke-width:1.1;fill:none}
+.la{stroke:#3451d1;stroke-width:1.3;fill:none}
+.lw{stroke:#d9480f;stroke-width:1.3;fill:none}
+.dash{stroke:#c4c4c4;stroke-width:1;fill:none;stroke-dasharray:3 4}
+.dot{fill:#111}.dota{fill:#3451d1}
+.cell{fill:#e9e9e9}.cella{fill:#3451d1}
+.ah{fill:#a3a3a3}.aha{fill:#3451d1}.ahw{fill:#d9480f}
+@media (prefers-color-scheme: dark){
+.h,.t,.tb{fill:#ececec}.sub{fill:#a0a0a0}.s{fill:#b0b0b0}.m{fill:#8a8a8a}
+.ta{fill:#8aa4ff}.tw{fill:#ff8a4c}
+.box{fill:#141414;stroke:#3a3a3a}.acc{fill:#121a33;stroke:#8aa4ff}.warn{fill:#2a1709;stroke:#ff8a4c}
+.ln{stroke:#6a6a6a}.la{stroke:#8aa4ff}.lw{stroke:#ff8a4c}.dash{stroke:#444}
+.dot{fill:#ececec}.dota{fill:#8aa4ff}.cell{fill:#2c2c2c}.cella{fill:#8aa4ff}
+.ah{fill:#6a6a6a}.aha{fill:#8aa4ff}.ahw{fill:#ff8a4c}}
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+<marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="aha"/></marker>
+<marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ahw"/></marker>
+</defs>
+<text x="28" y="36" class="h" text-anchor="start">One session, start to finish</text>
+<text x="28" y="58" class="sub" text-anchor="start">Claude Code fires hooks; each one is a ~0.1s call to mem. Nothing ever blocks the session.</text>
+<path d="M40,104 L870,104" class="ln" marker-end="url(#a)"/>
+<circle cx="110" cy="104" r="5" class="dota"/>
+<text x="110" y="90" class="ta" text-anchor="middle">SessionStart</text>
+<circle cx="285" cy="104" r="5" class="dota"/>
+<text x="285" y="90" class="ta" text-anchor="middle">UserPromptSubmit</text>
+<circle cx="460" cy="104" r="5" class="dota"/>
+<text x="460" y="90" class="ta" text-anchor="middle">PreCompact</text>
+<circle cx="635" cy="104" r="5" class="dota"/>
+<text x="635" y="90" class="ta" text-anchor="middle">Stop</text>
+<circle cx="800" cy="104" r="5" class="dot"/>
+<text x="800" y="90" class="tb" text-anchor="middle">SessionEnd</text>
+<text x="460" y="124" class="m" text-anchor="middle">+ PostCompact</text>
+<text x="635" y="124" class="m" text-anchor="middle">+ SubagentStop</text>
+<rect x="30" y="140" width="160" height="128" rx="7" class="box"/>
+<text x="42" y="162" class="tb" text-anchor="start">inject the wake</text>
+<text x="42" y="182" class="s" text-anchor="start">rules learned so far</text>
+<text x="42" y="199" class="s" text-anchor="start">conflicts · recurring errors</text>
+<text x="42" y="216" class="s" text-anchor="start">tasks · team chat</text>
+<text x="42" y="233" class="s" text-anchor="start">memory tree (fits budget)</text>
+<text x="42" y="250" class="s" text-anchor="start">spawn background indexer</text>
+<path d="M110,268 L110,300" class="dash"/>
+<rect x="205" y="140" width="160" height="128" rx="7" class="box"/>
+<text x="217" y="162" class="tb" text-anchor="start">per prompt</text>
+<text x="217" y="182" class="s" text-anchor="start">store your words verbatim</text>
+<text x="217" y="199" class="s" text-anchor="start">relevant memories</text>
+<text x="217" y="216" class="s" text-anchor="start">relevant code path:line</text>
+<text x="217" y="233" class="s" text-anchor="start">idea / explain / fix modes</text>
+<text x="217" y="250" class="s" text-anchor="start">#fresh = no memory</text>
+<path d="M285,268 L285,300" class="dash"/>
+<rect x="380" y="140" width="160" height="128" rx="7" class="box"/>
+<text x="392" y="162" class="tb" text-anchor="start">around compaction</text>
+<text x="392" y="182" class="s" text-anchor="start">snapshot your requests</text>
+<text x="392" y="199" class="s" text-anchor="start">save the summary</text>
+<text x="392" y="216" class="s" text-anchor="start">after it: re-inject the</text>
+<text x="392" y="233" class="s" text-anchor="start">original goal, verbatim</text>
+<path d="M460,268 L460,300" class="dash"/>
+<rect x="555" y="140" width="160" height="128" rx="7" class="box"/>
+<text x="567" y="162" class="tb" text-anchor="start">when an agent stops</text>
+<text x="567" y="182" class="s" text-anchor="start">harvest errors and</text>
+<text x="567" y="199" class="s" text-anchor="start">corrections -&gt; inbox</text>
+<text x="567" y="216" class="s" text-anchor="start">check cited paths/symbols</text>
+<text x="567" y="233" class="s" text-anchor="start">wrong? wake it up</text>
+<text x="567" y="250" class="s" text-anchor="start">refresh code index</text>
+<path d="M635,268 L635,300" class="dash"/>
+<rect x="740" y="140" width="120" height="128" rx="7" class="box"/>
+<text x="752" y="162" class="tb" text-anchor="start">last call</text>
+<text x="752" y="182" class="s" text-anchor="start">final harvest</text>
+<text x="752" y="199" class="s" text-anchor="start">(1.5s budget)</text>
+<path d="M800,268 L800,300" class="dash"/>
+<path d="M110,300 L800,300" class="dash"/>
+<rect x="28" y="330" width="156" height="78" rx="7" class="acc"/>
+<text x="40" y="352" class="ta" text-anchor="start">log.jsonl</text>
+<text x="40" y="372" class="s" text-anchor="start">append-only truth</text>
+<text x="40" y="389" class="s" text-anchor="start">every event, forever</text>
+<path d="M106,300 L106,328" class="ln" marker-end="url(#a)"/>
+<rect x="200" y="330" width="156" height="78" rx="7" class="box"/>
+<text x="212" y="352" class="tb" text-anchor="start">index.db</text>
+<text x="212" y="372" class="s" text-anchor="start">FTS5 search cache</text>
+<text x="212" y="389" class="s" text-anchor="start">rebuilt from the log</text>
+<path d="M278,300 L278,328" class="ln" marker-end="url(#a)"/>
+<rect x="372" y="330" width="156" height="78" rx="7" class="box"/>
+<text x="384" y="352" class="tb" text-anchor="start">atlas/*.db</text>
+<text x="384" y="372" class="s" text-anchor="start">code index per project</text>
+<text x="384" y="389" class="s" text-anchor="start">symbols · calls · docs</text>
+<path d="M450,300 L450,328" class="ln" marker-end="url(#a)"/>
+<rect x="544" y="330" width="156" height="78" rx="7" class="box"/>
+<text x="556" y="352" class="tb" text-anchor="start">chat.db</text>
+<text x="556" y="372" class="s" text-anchor="start">team board, claims</text>
+<text x="556" y="389" class="s" text-anchor="start">subagent reports</text>
+<path d="M622,300 L622,328" class="ln" marker-end="url(#a)"/>
+<rect x="716" y="330" width="156" height="78" rx="7" class="box"/>
+<text x="728" y="352" class="tb" text-anchor="start">sessions/</text>
+<text x="728" y="372" class="s" text-anchor="start">verbatim prompts</text>
+<text x="728" y="389" class="s" text-anchor="start">per session</text>
+<path d="M794,300 L794,328" class="ln" marker-end="url(#a)"/>
+<path d="M184,369 L198,369" class="la" marker-end="url(#aa)"/>
+<text x="450" y="432" class="m" text-anchor="middle">~/.claude/infinite/data  —  the installer never touches it</text>
+</svg>

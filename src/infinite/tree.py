@@ -1,4 +1,4 @@
-"""Summary tree per scope (OptMem / uniichat).
+"""Summary tree per scope (idea credited to OptMem and uniichat; independent implementation).
 
 Leaves are notes in scope order (pos). Block [lo,hi) is an aligned power-of-two
 range; its summary is one line the agent writes (`mem nap`). Wake tiles the past
@@ -13,48 +13,41 @@ import sqlite3
 from . import core
 
 
-def _cover(T: int, alpha: float):
-    root = 1
-    while root < T:
-        root *= 2
-    out, stack = [], [(0, root)]
-    while stack:
-        lo, hi = stack.pop()
-        if lo >= T:
-            continue
-        size = hi - lo
-        if size > 1 and (hi > T or size > alpha * (T - lo)):
-            mid = (lo + hi) // 2
-            stack.append((mid, hi))
-            stack.append((lo, mid))
-        else:
-            out.append((lo, hi))
-    out.sort()
+def _binary_blocks(T: int) -> list[tuple[int, int]]:
+    """[0,T) as the fewest aligned power-of-two blocks (one per set bit of T, largest first)."""
+    out, lo, bit = [], 0, 1 << max(0, T.bit_length() - 1)
+    while bit:
+        if T & bit:
+            out.append((lo, lo + bit))
+            lo += bit
+        bit >>= 1
     return out
 
 
-def cover(T: int, budget: int):
-    """Adapted from OptMem `cover`: at most `budget` blocks, finest near T."""
+def cover(T: int, budget: int) -> list[tuple[int, int]]:
+    """Tile [0,T) with at most `budget` aligned blocks, finest near the present.
+
+    Start from the minimal binary tiling (<= log2 T blocks), then repeatedly halve the block
+    that is coarsest *for its age* (size / distance-from-now, ties -> newest) until the budget
+    is spent. Each split adds one line, so detail fades smoothly with age."""
     if T <= 0:
         return []
     if T <= budget:
         return [(i, i + 1) for i in range(T)]
-    lo, hi = 0.0, 1.0
-    for _ in range(50):
-        mid = (lo + hi) / 2
-        if len(_cover(T, mid)) > budget:
-            lo = mid
-        else:
-            hi = mid
-    out = _cover(T, hi)
-    while len(out) < budget:
-        i = max((i for i, b in enumerate(out) if b[1] - b[0] > 1), default=None)
-        if i is None:
+    blocks = _binary_blocks(T)
+    while len(blocks) < budget:
+        best, i = -1.0, -1
+        for k, (lo, hi) in enumerate(blocks):
+            if hi - lo > 1:
+                r = (hi - lo) / (T - hi + 1)
+                if r >= best:
+                    best, i = r, k
+        if i < 0:
             break
-        a, b = out[i]
-        m = (a + b) // 2
-        out[i:i + 1] = [(a, m), (m, b)]
-    return out
+        lo, hi = blocks[i]
+        mid = (lo + hi) // 2
+        blocks[i:i + 1] = [(lo, mid), (mid, hi)]
+    return blocks
 
 
 def count(c, scope) -> int:

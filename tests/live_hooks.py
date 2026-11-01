@@ -27,7 +27,7 @@ r, t = hook("prompt", {"session_id": sid, "cwd": cwd, "prompt": "what did we dec
 print("\nprompt: %.2fs" % t)
 print(json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else "(no context)")
 bs = chr(92)
-bad = '{"session_id":"%s","cwd":"C:%sUsers%sklee","prompt":"hello there friend"}' % (sid, bs, bs)
+bad = '{"session_id":"%s","cwd":"C:%sUsers%suser","prompt":"hello there friend"}' % (sid, bs, bs)
 r, t = hook("prompt", None, raw=bad)
 print("\nunescaped-backslash input: rc=%d %.2fs" % (r.returncode, t))
 r, t = hook("stop", {"session_id": sid, "cwd": cwd, "stop_hook_active": False, "last_assistant_message": "ok"})

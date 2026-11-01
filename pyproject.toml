@@ -1,9 +1,14 @@
 [project]
-name = "claudeinfinite"
+name = "claude-infinite"
 version = "0.1.0"
 description = "Infinite, self-correcting memory and project organization for Claude Code (stdlib only)"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+readme = "README.md"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kleeedolinux/claude-infinite"
 
 [project.scripts]
 mem = "infinite.cli:main"
