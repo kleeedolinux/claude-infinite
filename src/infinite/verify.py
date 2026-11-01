@@ -55,15 +55,20 @@ def _resolve(raw: str, root: Path, extra_roots=()) -> Path | None:
     p = Path(s)
     if p.is_absolute() or re.match(r"^[A-Za-z]:/", s):
         return p if p.exists() else None
-    for base in (root, *extra_roots):
+    claude_home = Path.home() / ".claude"
+    for base in (root, root / ".claude", claude_home, Path.home(), *extra_roots):
         q = base / s
         if q.exists():
             return q
-    if "/" not in s:  # bare filename: anywhere in the tree (bounded)
-        for dp, dn, fn in os.walk(root):
-            dn[:] = [d for d in dn if d not in IGNORE and not d.startswith(".")]
-            if s in fn:
-                return Path(dp) / s
+    if "/" not in s:  # bare filename: anywhere in the tree, incl. .claude/ and ~/.claude (bounded)
+        for top in (root, claude_home):
+            for i, (dp, dn, fn) in enumerate(os.walk(top)):
+                dn[:] = [d for d in dn if d not in IGNORE and (not d.startswith(".") or d in (".claude", ".github"))
+                         and not (top == claude_home and d in ("projects", "file-history", "paste-cache", "shell-snapshots"))]
+                if s in fn:
+                    return Path(dp) / s
+                if i > 3000:
+                    break
     return None
 
 

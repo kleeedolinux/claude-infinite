@@ -187,6 +187,9 @@ class VerifyChatTest(unittest.TestCase):
         self.assertNotIn("new_module", joined)       # proposals are not hallucinations
         self.assertNotIn("parse_rows", joined)
         self.assertEqual(verify.check("All good in src/real.py and `parse_rows()`.", self.proj), [])
+        (self.proj / ".claude").mkdir(exist_ok=True)
+        (self.proj / ".claude" / "TASKS.md").write_text("# Tasks\n", encoding="utf-8")
+        self.assertEqual(verify.check("Tracked in TASKS.md (In progress).", self.proj), [])
 
     def test_subagent_hallucination_wakes_it_up_then_flags_compositor(self):
         from infinite import chat
