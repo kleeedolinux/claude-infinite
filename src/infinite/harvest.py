@@ -125,7 +125,9 @@ def harvest(transcript: str, scope: str, session: str, max_bytes: int = 4_000_00
                     for b in content:
                         if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error"):
                             t = _text(b.get("content")).strip()
-                            if t and "user doesn't want" not in t and "rejected" not in t[:80]:
+                            head = t[:160].lower()
+                            if t and "user doesn't want" not in head and "rejected" not in head[:80] \
+                                    and not ("permission" in head and "denied" in head):
                                 core.inbox_add(c, scope, "error", t[:400], sig=_sig(t), session=session)
                                 res["errors"] += 1
                 else:
